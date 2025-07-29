@@ -1,0 +1,131 @@
+# TLS Handshake Rate Limiter
+
+This project implements an XDP-based rate limiter for TLS Handshakes. It is designed to protect a server from being overwhelmed by a high volume of TLS handshakes, which can be a vector for denial-of-service attacks.
+
+The program inspects incoming network packets at the XDP hook, identifies TLS "Client Hello" messages on a specific port, and drops them if a configurable rate limit is exceeded.
+
+## Features
+
+- **High-Performance Packet Processing**: Leverages XDP for fast packet processing in the kernel's networking stack, before packets are sent to the userspace.
+- **Rate Limiting**: Limits the number of TLS handshakes per time window.
+- **Configurable**: Rate limiting parameters can be configured at compile time.
+- **Debug Logging**: Optional debug logging to monitor the program's behavior.
+
+## Requirements
+XDP Project has [xdp-tutorial repo](https://github.com/xdp-project/xdp-tutorial) that has good instrucions to set up all the dependencies for compiling XDP Programs. Its good to pull in that repo and compile the repo to make sure everything is set up correctly.
+
+To build and run this XDP program, you will need:
+
+- **Linux Kernel**: A recent Linux kernel with XDP support.
+- **Clang/LLVM**: To compile the C code into an eBPF object file.
+- **iproute2**: To load and unload the XDP program onto a network interface.
+
+## Building
+
+To compile the program, simply run `make`:
+
+```bash
+make
+```
+
+This will produce an object file named `tls_rate_limiter.o`.
+
+### Enabling Logs
+
+To compile the program with debug logging enabled, you can set the `DEBUG_LOG` environment variable to a non-empty value (e.g., `1` or `true`) before running `make`:
+
+```bash
+make DEBUG_LOG=1
+```
+
+This adds the `-DDEBUG_LOG` flag to the CFLAGS, which enables the logging functionality in the C code.
+
+## Usage
+
+### Loading the Program
+
+To load the XDP program onto a network interface, use the `load.sh` script with the interface name as an argument:
+
+```bash
+sudo ./load.sh <interface>
+```
+
+For example, to load it on `eth0`:
+
+```bash
+sudo ./load.sh eth0
+```
+
+The `load.sh` script has the following options:
+
+- **`<interface>`**: The network interface to load the XDP program on. This is a mandatory argument.
+- **`--logs`**: An optional flag to enable debug logging. When this flag is present, the script will first recompile the program with debug logs enabled and then display the logs from `/sys/kernel/debug/tracing/trace_pipe`.
+
+Example with logs:
+
+```bash
+sudo ./load.sh eth0 --logs
+```
+
+### Unloading the Program
+
+To unload the program from an interface, use the `unload.sh` script:
+
+```bash
+sudo ./unload.sh <interface>
+```
+
+For example:
+
+```bash
+sudo ./unload.sh eth0
+```
+
+### Viewing Logs
+
+If the program is already loaded and you want to view the logs, you can use the following command:
+
+```bash
+sudo cat /sys/kernel/debug/tracing/trace_pipe
+```
+
+## Configuration
+
+The rate limiting parameters can be configured at compile time by setting environment variables before running `make`.
+
+- **`MAX_HANDSHAKES_PER_TW`**: The maximum number of "Client Hello" messages to allow in a time window. Default is `5`.
+- **`TIME_WINDOW_NS`**: The duration of the time window in nanoseconds. Default is `1,000,000,000` (1 second).
+- **`DEBUG_LOG`**: Set to `1` to enable debug logging.
+
+For example, to set the maximum handshakes to 10 and the time window to 2 seconds:
+
+```bash
+export MAX_HANDSHAKES_PER_TW=10
+export TIME_WINDOW_NS=2000000000
+make
+```
+
+The target port for monitoring TLS handshakes is currently hardcoded to `6379` (Redis) in `tls_rate_limiter.c`.
+
+## How it Works
+
+The XDP program works as follows:
+
+1.  **Packet Parsing**: It parses the Ethernet, IP, and TCP headers of each incoming packet.
+2.  **TLS "Client Hello" Detection**: It checks if the packet is a TLS "Client Hello" message destined for the target port.
+3.  **Rate Limiting Logic**:
+    - It uses an eBPF hash map (`handshake_ratelimit_map`) to store the timestamp of the first "Client Hello" and a counter for the current time window.
+    - When a "Client Hello" is detected, it checks the map.
+    - If the time window has not expired, it increments the counter. If the counter exceeds `MAX_HANDSHAKES_PER_TW`, the packet is dropped.
+    - If the time window has expired, it resets the timestamp and the counter.
+4.  **Packet Disposition**:
+    - If the rate limit is exceeded, the packet is dropped (`XDP_DROP`).
+    - Otherwise, the packet is allowed to proceed up the network stack (`XDP_PASS`).
+
+## License
+
+This project is licensed under the **GNU General Public License (GPL)**.
+
+## Acknowledgments
+
+This project was bootstrapped and developed with significant assistance from the Gemini family of models, particularly Gemini 2.5 Pro, via the [Gemini CLI](https://github.com/google-gemini/gemini-cli). The initial code structure, core logic, and build scripts were generated by the AI, with minor manual refinements. This approach demonstrates the power of AI-assisted development in creating specialized, high-performance networking tools.
