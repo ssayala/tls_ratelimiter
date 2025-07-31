@@ -65,36 +65,54 @@ char __license[] SEC("license") = "GPL";
 static __always_inline int parse_packet(void **data, void *data_end,
                                         struct ethhdr **eth, struct iphdr **ip,
                                         struct tcphdr **tcp) {
-  // Parse Ethernet header
+  // Boundary check: Check if the packet is large enough for an Ethernet header.
   *eth = *data;
   if ((void *)*eth + sizeof(**eth) > data_end)
     return 0;
+  
+  // Advance the data pointer past the Ethernet header.
   *data = (void *)*eth + sizeof(**eth);
   if ((*eth)->h_proto != __constant_htons(ETH_P_IP))
     return 0;
 
-  // Parse IP header
+  // Boundary check: Check if the packet is large enough for a minimal IP header.
   *ip = *data;
   if ((void *)*ip + sizeof(**ip) > data_end)
     return 0;
+  
+  // Calculate the dynamic size of the IP header.
   __u8 ip_header_size = (*ip)->ihl * 4;
+
+  // Boundary check: Ensure the IP header size is at least the minimum size.
   if (ip_header_size < sizeof(**ip))
     return 0;
+
+  // Boundary check: Ensure the full IP header is within the packet boundaries.
   if ((void *)*ip + ip_header_size > data_end)
     return 0;
+
+  // Advance the data pointer past the IP header.
   *data = (void *)*ip + ip_header_size;
   if ((*ip)->protocol != IPPROTO_TCP)
     return 0;
 
-  // Parse TCP header
+  // Boundary check: Check if the packet is large enough for a minimal TCP header.
   *tcp = *data;
   if ((void *)*tcp + sizeof(**tcp) > data_end)
     return 0;
+
+  // Calculate the dynamic size of the TCP header.
   __u8 tcp_header_size = (*tcp)->doff * 4;
+
+  // Boundary check: Ensure the TCP header size is at least the minimum.
   if (tcp_header_size < sizeof(*tcp))
     return 0;
+
+  // Boundary check: Ensure the full TCP header is within the packet boundaries.
   if ((void *)*tcp + tcp_header_size > data_end)
     return 0;
+
+  // Advance the data pointer past the TCP header.
   *data = (void *)*tcp + tcp_header_size;
 
   // Check if the destination port is the target port
@@ -112,6 +130,10 @@ int detect_and_rate_limit_tls(struct xdp_md *ctx) {
   void *data = (void *)(long)ctx->data;
   void *data_end = (void *)(long)ctx->data_end;
 
+  // Defensively check if the packet is empty.
+  if (data >= data_end)
+    return XDP_PASS;
+
   struct ethhdr *eth;
   struct iphdr *ip;
   struct tcphdr *tcp;
@@ -121,7 +143,7 @@ int detect_and_rate_limit_tls(struct xdp_md *ctx) {
     return XDP_PASS;
   }
 
-  // Check for TLS Client Hello
+  // Boundary check: Ensure the packet is large enough for a TLS header.
   if (data + sizeof(struct tls_hdr) > data_end)
     return XDP_PASS;
 
@@ -162,7 +184,9 @@ int detect_and_rate_limit_tls(struct xdp_md *ctx) {
     struct handshake_data new_entry = {};
     new_entry.timestamp = now;
     new_entry.count = 1;
-    bpf_map_update_elem(&handshake_ratelimit_map, &key, &new_entry, BPF_ANY);
+    // Use BPF_NOEXIST to prevent a race condition where two CPUs
+    // try to create the initial entry at the same time.
+    bpf_map_update_elem(&handshake_ratelimit_map, &key, &new_entry, BPF_NOEXIST);
   }
 
   // If the packet is allowed, print a message (for debugging).
