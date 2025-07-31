@@ -58,73 +58,50 @@ struct {
 // License for the eBPF program. Required for the program to be loaded.
 char __license[] SEC("license") = "GPL";
 
-// --- PARSING HELPER FUNCTIONS (Defined Once) ---
+// --- PARSING HELPER FUNCTION ---
 
-// parse_ethernet_header checks if the packet is an Ethernet frame and
-// if it contains an IP packet.
-static __always_inline int parse_ethernet_header(void **data, void *data_end,
-                                                 struct ethhdr **eth) {
+// parse_packet processes Ethernet, IP, and TCP headers. It returns 1
+// if the packet is a valid TCP packet for the target port, and 0 otherwise.
+static __always_inline int parse_packet(void **data, void *data_end,
+                                        struct ethhdr **eth, struct iphdr **ip,
+                                        struct tcphdr **tcp) {
+  // Parse Ethernet header
   *eth = *data;
-  // Boundary check: Ensure the Ethernet header is within the packet bounds.
   if ((void *)*eth + sizeof(**eth) > data_end)
     return 0;
-  *data = (void *)*eth +
-          sizeof(**eth); // Move data pointer past the Ethernet header.
-  // Check if the protocol is IP.
+  *data = (void *)*eth + sizeof(**eth);
   if ((*eth)->h_proto != __constant_htons(ETH_P_IP))
     return 0;
-  return 1;
-}
 
-// parse_ip_header checks if the packet has a valid IP header.
-static __always_inline int parse_ip_header(void **data, void *data_end,
-                                           struct iphdr **ip) {
+  // Parse IP header
   *ip = *data;
-  // Boundary check: Ensure the IP header is within the packet bounds.
   if ((void *)*ip + sizeof(**ip) > data_end)
     return 0;
-  __u8 ip_header_size = (*ip)->ihl * 4; // Calculate IP header size.
+  __u8 ip_header_size = (*ip)->ihl * 4;
   if (ip_header_size < sizeof(**ip))
     return 0;
-  // Boundary check: Ensure the full IP header is within packet bounds.
   if ((void *)*ip + ip_header_size > data_end)
     return 0;
-  *data = (void *)*ip + ip_header_size; // Move data pointer past the IP header.
-  // Check if the protocol is TCP.
+  *data = (void *)*ip + ip_header_size;
   if ((*ip)->protocol != IPPROTO_TCP)
     return 0;
-  return 1;
-}
 
-// parse_tcp_header checks for a valid TCP header and returns it.
-static __always_inline struct tcphdr *parse_tcp_header(void **data,
-                                                       void *data_end) {
-  struct tcphdr *tcp = *data;
-  // Boundary check: Ensure the fixed-size TCP header is within packet bounds.
-  if ((void *)tcp + sizeof(*tcp) > data_end)
-    return NULL;
-  __u8 tcp_header_size = tcp->doff * 4; // Calculate TCP header size.
-  if (tcp_header_size < sizeof(*tcp))
-    return NULL;
-  // Boundary check: Ensure the full TCP header is within packet bounds.
-  if ((void *)tcp + tcp_header_size > data_end)
-    return NULL;
-  *data =
-      (void *)tcp + tcp_header_size; // Move data pointer past the TCP header.
-  return tcp;
-}
-
-// is_tls_client_hello checks if the payload is a TLS Client Hello message.
-static __always_inline int is_tls_client_hello(void *data, void *data_end) {
-  // Boundary check: Ensure the TLS header is within the packet bounds.
-  if (data + sizeof(struct tls_hdr) > data_end)
+  // Parse TCP header
+  *tcp = *data;
+  if ((void *)*tcp + sizeof(**tcp) > data_end)
     return 0;
-  struct tls_hdr *tls = data;
-  // Check for the specific TLS content and handshake types.
-  if (tls->content_type == TLS_CONTENT_TYPE_HANDSHAKE &&
-      tls->handshake_type == TLS_HANDSHAKE_TYPE_CLIENT_HELLO)
-    return 1;
-  return 0;
+  __u8 tcp_header_size = (*tcp)->doff * 4;
+  if (tcp_header_size < sizeof(*tcp))
+    return 0;
+  if ((void *)*tcp + tcp_header_size > data_end)
+    return 0;
+  *data = (void *)*tcp + tcp_header_size;
+
+  // Check if the destination port is the target port
+  if ((*tcp)->dest != __constant_htons(TARGET_PORT))
+    return 0;
+
+  return 1;
 }
 
 // --- MAIN XDP PROGRAM ---
@@ -139,20 +116,18 @@ int detect_and_rate_limit_tls(struct xdp_md *ctx) {
   struct iphdr *ip;
   struct tcphdr *tcp;
 
-  // Sequentially parse packet headers. If any parser fails, pass the packet.
-  if (!parse_ethernet_header(&data, data_end, &eth))
+  // If the packet is not a valid TCP packet for the target port, pass it.
+  if (!parse_packet(&data, data_end, &eth, &ip, &tcp)) {
     return XDP_PASS;
-  if (!parse_ip_header(&data, data_end, &ip))
+  }
+
+  // Check for TLS Client Hello
+  if (data + sizeof(struct tls_hdr) > data_end)
     return XDP_PASS;
 
-  tcp = parse_tcp_header(&data, data_end);
-  if (!tcp)
-    return XDP_PASS;
-  // Check if the destination port is the Redis TLS port.
-  if (tcp->dest != __constant_htons(TARGET_PORT))
-    return XDP_PASS;
-  // Check if the payload is a TLS Client Hello.
-  if (!is_tls_client_hello(data, data_end))
+  struct tls_hdr *tls = data;
+  if (tls->content_type != TLS_CONTENT_TYPE_HANDSHAKE ||
+      tls->handshake_type != TLS_HANDSHAKE_TYPE_CLIENT_HELLO)
     return XDP_PASS;
 
   // --- GLOBAL RATE LIMITING LOGIC ---
