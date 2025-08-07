@@ -1,0 +1,31 @@
+name: C/C++ CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt install clang llvm libelf-dev libpcap-dev build-essential libc6-dev-i386 m4
+          sudo apt install linux-tools-$(uname -r)
+          sudo apt install linux-headers-$(uname -r)
+
+      - name: Build eBPF program
+        run: make
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: tls_rate_limiter.o
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
